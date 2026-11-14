@@ -1,0 +1,7 @@
+streamlit
+groq
+pypdf
+rank-bm25
+pytesseract
+pillow
+pymupdf
