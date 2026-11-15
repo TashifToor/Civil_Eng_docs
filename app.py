@@ -11,14 +11,15 @@ from groq import Groq
 # OCR (images + scanned PDFs). Agar installed na ho to app phir bhi chalti hai.
 try:
     import pytesseract
-    from PIL import Image
+    from PIL import Image, ImageOps
     import fitz  # pymupdf
     pytesseract.get_tesseract_version()
     OCR_OK = True
 except Exception:
     OCR_OK = False
 
-MODEL = "llama-3.3-70b-versatile"   # limit aaye to "llama-3.1-8b-instant" kar do
+MODELS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]   # pehla try hota hai, fail ho to doosra
+FAST_MODEL = "openai/gpt-oss-20b"
 CHUNK_WORDS = 180
 OVERLAP = 40
 TOP_K = 6
@@ -81,8 +82,15 @@ def pdf_to_chunks(name, data):
 def image_to_chunks(name, data):
     if not OCR_OK:
         return []
-    img = Image.open(io.BytesIO(data)).convert("RGB")
-    text = " ".join(pytesseract.image_to_string(img).split())
+    img = Image.open(io.BytesIO(data))
+    img = ImageOps.exif_transpose(img).convert("L")   # WhatsApp photos ki rotation theek
+    img = ImageOps.autocontrast(img)
+    if img.width < 1600:
+        img = img.resize((img.width * 2, img.height * 2))
+    text = pytesseract.image_to_string(img)
+    if len(text.strip()) < 30:
+        text = pytesseract.image_to_string(img, config="--psm 6")
+    text = " ".join(text.split())
     return split_words(name, 1, text) if text else []
 
 def any_to_chunks(name, data):
@@ -190,12 +198,13 @@ with st.sidebar:
 def english_keywords(q):
     try:
         r = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model=FAST_MODEL,
+            extra_body={"reasoning_effort": "low"},
             messages=[
                 {"role": "system", "content": "Student ka sawal Roman Urdu/Urdu/English me ho sakta hai. Usay civil engineering textbook search ke liye 8-15 English keywords/phrases me convert karo. Sirf keywords output karo, aur kuch nahi."},
                 {"role": "user", "content": q},
             ],
-            temperature=0, max_tokens=60,
+            temperature=0, max_tokens=500,
         )
         return r.choices[0].message.content
     except Exception:
@@ -230,11 +239,21 @@ Note: context OCR se bhi aa sakta hai, to chhoti spelling/formula ki ghaltiyan h
 CONTEXT:
 {context}"""
     msgs = [{"role": "system", "content": system}] + history[-6:]
-    stream = client.chat.completions.create(model=MODEL, messages=msgs, temperature=0.2, stream=True)
-    for part in stream:
-        d = part.choices[0].delta.content
-        if d:
-            yield d
+    last_err = None
+    for mdl in MODELS:
+        try:
+            stream = client.chat.completions.create(
+                model=mdl, messages=msgs, temperature=0.2, stream=True,
+                extra_body={"reasoning_effort": "low"},
+            )
+            for part in stream:
+                d = part.choices[0].delta.content
+                if d:
+                    yield d
+            return
+        except Exception as e:
+            last_err = e
+    raise last_err
 
 # ---------- Chat UI ----------
 st.title("🏗️ Civil Engineering Study Bot")
@@ -272,4 +291,4 @@ if prompt := st.chat_input("Sawal poochho..."):
                             st.markdown(f"**{s['source']} (p.{s['page']})**\n\n{s['text'][:500]}...")
                 st.session_state.messages.append({"role": "assistant", "content": answer, "sources": hits})
             except Exception as e:
-                st.error(f"Error: {e}\n\nRate limit ho to 1 minute ruko ya MODEL ko llama-3.1-8b-instant kar do.")
+                st.error(f"Error: {e}\n\nRate limit ho to 1 minute ruko aur dobara poochho.")
