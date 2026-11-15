@@ -148,6 +148,23 @@ def load_base(sig_key):
         pass
     return data, "built"
 
+def clean_text(t):
+    t = re.sub("\u00ad\\s*", "", t)               # soft hyphen (aur uske baad ka space)
+    t = re.sub(r"(\w)[-\u2010\u2011]\s+(\w)", r"\1\2", t)   # "con- tinues" -> "continues"
+    t = re.sub(r"[^\x20-\x7E]+", " ", t)          # ajeeb symbols hatao
+    t = re.sub(r"([.\-_~*=:;|'\"])\1{2,}", r"\1", t)  # ....... ----- etc
+    return " ".join(t.split())
+
+def is_good(t):
+    """Garbage (maps, noise, OCR kachra) wale chunks hata do."""
+    nospace = t.replace(" ", "")
+    if len(nospace) < 60:
+        return False
+    letters = sum(ch.isalpha() for ch in nospace) / len(nospace)
+    toks = t.split()
+    wordlike = sum(1 for w in toks if len(re.sub(r"[^A-Za-z]", "", w)) >= 3) / max(len(toks), 1)
+    return letters >= 0.4 and wordlike >= 0.3
+
 @st.cache_resource(show_spinner="Search index ban raha hai...")
 def build_search(sig_key, uploads):
     data, _ = load_base(sig_key)
@@ -158,6 +175,12 @@ def build_search(sig_key, uploads):
         chunks += c
         if not c:
             warnings.append(f"{name}: text nahi mila" + ("" if OCR_OK else " (OCR off hai)"))
+    cleaned = []
+    for c in chunks:
+        txt = clean_text(c["text"])
+        if is_good(txt):
+            cleaned.append({"source": c["source"], "page": c["page"], "text": txt})
+    chunks = cleaned
     bm25 = BM25Okapi([tokenize(c["text"]) for c in chunks]) if chunks else None
     return chunks, bm25, warnings
 
@@ -210,34 +233,55 @@ def english_keywords(q):
     except Exception:
         return ""
 
+SMALL = {"hi", "hello", "hey", "hlo", "helo", "salam", "salaam", "aoa", "assalamualaikum", "asalam",
+         "thanks", "thank", "shukriya", "ok", "okay", "bye", "yo"}
+
+def is_smalltalk(q):
+    words = re.findall(r"[a-zA-Z]+", q.lower())
+    if not words:
+        return True
+    return len(words) <= 4 and words[0] in SMALL
+
 def retrieve(q):
     if not bm25:
         return []
     query = q + " " + english_keywords(q)
     scores = bm25.get_scores(tokenize(query))
     top = sorted(range(len(chunks)), key=lambda i: scores[i], reverse=True)[:TOP_K]
-    return [chunks[i] for i in top if scores[i] > 0]
+    if not top or scores[top[0]] <= 0:
+        return []
+    best = scores[top[0]]
+    return [chunks[i] for i in top if scores[i] >= 0.4 * best]
 
 STYLE_PROMPT = {
-    "Detailed (step by step)": "Detailed, step by step samjhao, headings aur formulas ke sath.",
-    "Short (exam revision)": "Bohat short bullet points me do, exam revision ke liye.",
-    "Numerical solve karo (formulas + steps)": "Numerical ho to formula likho, values rakho, units ke sath step by step solve karo aur final answer highlight karo.",
-    "MCQs banao (practice)": "Context ke topic par 5 MCQs banao (4 options), last me answers aur chhoti explanation do.",
+    "Detailed (step by step)": "Explain in detail, step by step, with headings and formulas.",
+    "Short (exam revision)": "Answer in very short bullet points for exam revision.",
+    "Numerical solve karo (formulas + steps)": "If it is a numerical, write the formula, substitute values, solve step by step with units, and highlight the final answer.",
+    "MCQs banao (practice)": "Create 5 MCQs (4 options each) on the topic from the context, then give answers with a short explanation.",
 }
 
+LANG_RULE = {
+    "Jis me main likhun": "Reply in the same language the student writes in, but ONLY English or Roman Urdu (Urdu written in English letters). If unsure, use English.",
+    "English": "Reply in English.",
+    "Roman Urdu": "Reply in Roman Urdu (Urdu written in English letters); keep technical terms in English.",
+}
+NO_SCRIPT = "NEVER use Hindi, Devanagari, Urdu/Arabic script or any non-Latin script. Use only English letters."
+
 def stream_answer(history, hits):
-    context = "\n\n".join(f"[{i+1}] ({h['source']}, page {h['page']})\n{h['text']}" for i, h in enumerate(hits))
-    lang_rule = {"Jis me main likhun": "Student jis language me likhe usi me jawab do.",
-                 "English": "Reply in English.",
-                 "Roman Urdu": "Roman Urdu me jawab do (technical terms English me)."}[lang]
-    system = f"""Tum ek civil engineering study assistant ho. Student ke exam ki tayyari hai.
-SIRF neeche diye CONTEXT (student ke docs) se jawab do. {STYLE_PROMPT[style]} {lang_rule}
-Jawab me source likho jaise (filename, page X).
-Agar context me jawab na ho to saaf bolo "Docs me ye nahi mila" aur guess mat karo.
-Note: context OCR se bhi aa sakta hai, to chhoti spelling/formula ki ghaltiyan ho sakti hain.
+    if hits:
+        context = "\n\n".join(f"[{i+1}] ({h['source']}, page {h['page']})\n{h['text']}" for i, h in enumerate(hits))
+        system = f"""You are a civil engineering study assistant helping a student prepare for an exam.
+Answer ONLY from the CONTEXT below (the student's documents). {STYLE_PROMPT[style]}
+{LANG_RULE[lang]} {NO_SCRIPT}
+Mention sources like (filename, page X).
+If the context does not contain the answer, say clearly that it was not found in the docs and do not guess.
+The context may come from OCR, so ignore obvious garbage characters and small spelling or formula errors.
 
 CONTEXT:
 {context}"""
+    else:
+        system = f"""You are a friendly civil engineering study assistant. The student sent a greeting or small talk.
+Reply in 1-2 short sentences and ask which topic they want to study. {LANG_RULE[lang]} {NO_SCRIPT}"""
     msgs = [{"role": "system", "content": system}] + history[-6:]
     last_err = None
     for mdl in MODELS:
@@ -279,16 +323,20 @@ if prompt := st.chat_input("Sawal poochho..."):
             st.warning("Koi doc load nahi hua. docs/ folder me files daalo ya sidebar se upload karo.")
         else:
             try:
-                hits = retrieve(prompt)
-                if not hits:
-                    answer = "Docs me ye nahi mila. Sawal ko alag alfaz me poochho."
-                    st.markdown(answer)
+                history = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages]
+                if is_smalltalk(prompt):
+                    answer = st.write_stream(stream_answer(history, []))
+                    hits = []
                 else:
-                    history = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages]
-                    answer = st.write_stream(stream_answer(history, hits))
-                    with st.expander("📖 Sources"):
-                        for s in hits:
-                            st.markdown(f"**{s['source']} (p.{s['page']})**\n\n{s['text'][:500]}...")
-                st.session_state.messages.append({"role": "assistant", "content": answer, "sources": hits})
+                    hits = retrieve(prompt)
+                    if not hits:
+                        answer = "Ye docs me nahi mila. Sawal ko thore alag alfaz me poochho."
+                        st.markdown(answer)
+                    else:
+                        answer = st.write_stream(stream_answer(history, hits))
+                        with st.expander("📖 Sources"):
+                            for s_ in hits[:4]:
+                                st.markdown(f"**{s_['source']} (p.{s_['page']})**\n\n{s_['text'][:300]}...")
+                st.session_state.messages.append({"role": "assistant", "content": answer, "sources": hits[:4]})
             except Exception as e:
                 st.error(f"Error: {e}\n\nRate limit ho to 1 minute ruko aur dobara poochho.")
