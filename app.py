@@ -27,7 +27,25 @@ MAX_OCR_PAGES = 80
 EXTS = (".pdf", ".txt", ".md", ".png", ".jpg", ".jpeg", ".webp")
 INDEX_FILE = "index.json"
 
-st.set_page_config(page_title="Civil Engineering Study Bot", page_icon="🏗️", layout="wide")
+st.set_page_config(page_title="Civil Study Bot", page_icon="🏗️", layout="centered",
+                   initial_sidebar_state="collapsed")
+
+st.markdown("""
+<style>
+.block-container {max-width: 820px; padding-top: 2.5rem; padding-bottom: 6rem;}
+footer {visibility: hidden;}
+pre, code {white-space: pre-wrap !important; word-break: break-word;}
+[data-testid="stMarkdownContainer"] table {display: block; overflow-x: auto; max-width: 100%;}
+[data-testid="stChatMessage"] img {max-width: 100%; height: auto;}
+@media (max-width: 640px) {
+  .block-container {padding-left: .7rem; padding-right: .7rem; padding-top: 2.2rem;}
+  h1 {font-size: 1.35rem !important; line-height: 1.3;}
+  [data-testid="stChatMessage"] {padding: .4rem .2rem; gap: .5rem;}
+  [data-testid="stMarkdownContainer"] p, [data-testid="stMarkdownContainer"] li {font-size: 1rem; line-height: 1.55;}
+  [data-testid="stChatInput"] textarea {font-size: 16px;}
+}
+</style>
+""", unsafe_allow_html=True)
 
 # ---------- API key ----------
 def get_key():
@@ -301,7 +319,7 @@ Reply in 1-2 short sentences and ask which topic they want to study. {LANG_RULE[
 
 # ---------- Chat UI ----------
 st.title("🏗️ Civil Engineering Study Bot")
-st.caption("Sirf tumhare docs se jawab deta hai, source page ke sath.")
+st.caption("Docs se jawab, source page ke sath. Settings/upload: upar left ka » arrow.")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
