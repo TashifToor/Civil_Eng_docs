@@ -94,12 +94,21 @@ def any_to_chunks(name, data):
     return split_words(name, 1, data.decode("utf-8", errors="ignore"))
 
 # ---------- Index: ek baar banao, index.json me save, dobara na padho ----------
+def safe_size(p):
+    try:
+        return os.path.getsize(p)
+    except OSError:
+        return -1
+
 def doc_files():
-    return [p for p in sorted(glob.glob("docs/**/*", recursive=True))
-            if os.path.isfile(p) and p.lower().endswith(EXTS)]
+    out = []
+    for p in sorted(glob.glob("docs/**/*", recursive=True)):
+        if p.lower().endswith(EXTS) and os.path.isfile(p) and safe_size(p) >= 0:
+            out.append(p)
+    return out
 
 def folder_signature():
-    return [[p.replace("\\", "/"), os.path.getsize(p)] for p in doc_files()]
+    return [[p.replace("\\", "/"), safe_size(p)] for p in doc_files()]
 
 @st.cache_resource(show_spinner="Docs padh raha hun (sirf pehli baar, phir index.json save hoga)...")
 def load_base(sig_key):
@@ -108,16 +117,18 @@ def load_base(sig_key):
         try:
             with open(INDEX_FILE, encoding="utf-8") as f:
                 data = json.load(f)
-            # docs folder khali ho (sirf index push kiya) ya docs same hon -> index use karo
-            if not sig or data.get("sig") == sig:
-                return data, "loaded"
+            # index.json maujood hai to hamesha wahi use karo (docs dobara nahi padhe jayenge)
+            return data, "loaded"
         except Exception:
             pass
     chunks, warnings = [], []
     for p in doc_files():
         name = os.path.basename(p)
-        with open(p, "rb") as f:
-            c = any_to_chunks(name, f.read())
+        try:
+            with open(p, "rb") as f:
+                c = any_to_chunks(name, f.read())
+        except Exception:
+            c = []
         chunks += c
         if not c:
             warnings.append(f"{name}: text nahi mila" + ("" if OCR_OK else " (OCR off hai)"))
