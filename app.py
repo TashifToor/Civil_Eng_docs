@@ -24,7 +24,7 @@ CHUNK_WORDS = 180
 OVERLAP = 40
 TOP_K = 6
 MAX_OCR_PAGES = 80
-EXTS = (".pdf", ".txt", ".md", ".png", ".jpg", ".jpeg", ".webp")
+EXTS = (".pdf", ".pptx", ".txt", ".md", ".png", ".jpg", ".jpeg", ".webp")
 INDEX_FILE = "index.json"
 
 st.set_page_config(page_title="Civil Study Bot", page_icon="🏗️", layout="centered",
@@ -97,9 +97,7 @@ def pdf_to_chunks(name, data):
             chunks += split_words(name, pno, text)
     return chunks
 
-def image_to_chunks(name, data):
-    if not OCR_OK:
-        return []
+def ocr_bytes(data):
     img = Image.open(io.BytesIO(data))
     img = ImageOps.exif_transpose(img).convert("L")   # WhatsApp photos ki rotation theek
     img = ImageOps.autocontrast(img)
@@ -108,13 +106,62 @@ def image_to_chunks(name, data):
     text = pytesseract.image_to_string(img)
     if len(text.strip()) < 30:
         text = pytesseract.image_to_string(img, config="--psm 6")
-    text = " ".join(text.split())
+    return " ".join(text.split())
+
+def image_to_chunks(name, data):
+    if not OCR_OK:
+        return []
+    text = ocr_bytes(data)
     return split_words(name, 1, text) if text else []
+
+def pptx_to_chunks(name, data):
+    from pptx import Presentation
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
+    prs = Presentation(io.BytesIO(data))
+    chunks, pics = [], [0]
+
+    def walk(shapes, texts):
+        for sh in shapes:
+            try:
+                st_ = sh.shape_type
+            except Exception:
+                st_ = None
+            if st_ == MSO_SHAPE_TYPE.GROUP:
+                walk(sh.shapes, texts)
+                continue
+            if getattr(sh, "has_text_frame", False) and sh.has_text_frame and sh.text_frame.text.strip():
+                texts.append(sh.text_frame.text)
+            if getattr(sh, "has_table", False) and sh.has_table:
+                for row in sh.table.rows:
+                    texts.append(" | ".join(c.text for c in row.cells))
+            if st_ == MSO_SHAPE_TYPE.PICTURE and OCR_OK and pics[0] < 80:
+                try:
+                    blob = sh.image.blob
+                    if len(blob) > 20000:          # chhote icons/logos skip
+                        pics[0] += 1
+                        texts.append(ocr_bytes(blob))
+                except Exception:
+                    pass
+
+    for n, slide in enumerate(prs.slides, start=1):
+        texts = []
+        walk(slide.shapes, texts)
+        try:
+            if slide.has_notes_slide:
+                texts.append(slide.notes_slide.notes_text_frame.text)
+        except Exception:
+            pass
+        text = " ".join(" ".join(texts).split())
+        if text:
+            chunks += split_words(name, n, text)
+    return chunks
 
 def any_to_chunks(name, data):
     low = name.lower()
     if low.endswith(".pdf"):
         return pdf_to_chunks(name, data)
+    if low.endswith(".pptx"):
+        return pptx_to_chunks(name, data)
     if low.endswith((".png", ".jpg", ".jpeg", ".webp")):
         return image_to_chunks(name, data)
     return split_words(name, 1, data.decode("utf-8", errors="ignore"))
@@ -212,8 +259,8 @@ with st.sidebar:
         "MCQs banao (practice)",
     ])
     lang = st.selectbox("Language", ["Jis me main likhun", "English", "Roman Urdu"])
-    uploads_files = st.file_uploader("Extra PDF / image / TXT upload karo",
-                                     type=["pdf", "txt", "md", "png", "jpg", "jpeg", "webp"],
+    uploads_files = st.file_uploader("Extra PDF / PPTX / image / TXT upload karo",
+                                     type=["pdf", "pptx", "txt", "md", "png", "jpg", "jpeg", "webp"],
                                      accept_multiple_files=True)
     if st.button("🗑️ Chat clear"):
         st.session_state.messages = []
